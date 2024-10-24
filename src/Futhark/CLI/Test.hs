@@ -105,7 +105,28 @@ withProgramServer program runner extra_options f = do
   context prog_ctx $
     pureTestResults $
       liftIO $
-        withServer (futharkServerCfg to_run to_run_args) f
+        withServer (futharkServerCfg to_run to_run_args) $ \server -> do
+          timeoutmvar <- newEmptyMVar
+          _ <- forkFinally (f server) $ \res -> do
+            _ <- tryPutMVar timeoutmvar (Right res)
+            case res of
+              Left e -> throwIO e
+              Right _ -> pure ()
+          guardthread <- forkIO $ do
+            threadDelay $ 5 * 60 * 1000000
+            putMVar timeoutmvar (Left ())
+          takeMVar timeoutmvar >>= \case
+            Right res -> do
+              killThread guardthread
+              pure $ case res of
+                Right r -> r
+                Left e -> [Failure [showText e]]
+            Left _ -> do
+              abortServer server
+              -- The signal above is expected to abort the withServer
+              -- we're in.
+              _ <- takeMVar timeoutmvar
+              pure []
 
 data TestMode
   = -- | Only type check.
